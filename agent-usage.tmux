@@ -8,14 +8,14 @@ count_usage_width() {
     local token
     local tail
 
-    for token in "#{agent_usage}" "#{claude_usage}" "#{codex_usage}"; do
+    for token in "#{agent_usage}" "#{agent_usage_all}" "#{claude_usage}" "#{codex_usage}" "#{copilot_usage}" "#{opencodego_usage}"; do
         tail="$string"
         while [[ "$tail" == *"$token"* ]]; do
             # one column more than the bar needs, for the 'w' of the weekly window
             case "$token" in
-                "#{agent_usage}") total=$(( total + 30 )) ;;
-                "#{claude_usage}") total=$(( total + 14 )) ;;
-                "#{codex_usage}") total=$(( total + 15 )) ;;
+                "#{agent_usage}") total=$(( total + 41 )) ;;
+                "#{agent_usage_all}") total=$(( total + 90 )) ;;
+                *) total=$(( total + 21 )) ;;
             esac
             tail="${tail#*"$token"}"
         done
@@ -31,12 +31,17 @@ do_interpolation() {
     local string="$1"
     local claude_window="#{@agent_usage_window_claude}"
     local codex_window="#{@agent_usage_window_codex}"
+    local copilot_window="#{@agent_usage_window_copilot}"
+    local opencodego_window="#{@agent_usage_window_opencodego}"
     local nonce="#{@agent_usage_nonce}"   # bumped by the menu's 'Refresh now'
     # individual bars
-    string="${string/\#\{claude_usage\}/#($CURRENT_DIR/scripts/agent_usage.sh claude $claude_window $nonce)}"
-    string="${string/\#\{codex_usage\}/#($CURRENT_DIR/scripts/agent_usage.sh codex $codex_window $nonce)}"
+    string="${string//\#\{claude_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" claude $claude_window $nonce)}"
+    string="${string//\#\{codex_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" codex $codex_window $nonce)}"
+    string="${string//\#\{copilot_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" copilot $copilot_window $nonce)}"
+    string="${string//\#\{opencodego_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" opencodego $opencodego_window $nonce)}"
     # combined (backwards compat)
-    string="${string/\#\{agent_usage\}/#($CURRENT_DIR/scripts/agent_usage.sh both $claude_window $codex_window $nonce)}"
+    string="${string//\#\{agent_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" both $claude_window $codex_window $nonce)}"
+    string="${string//\#\{agent_usage_all\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" all $claude_window $codex_window $copilot_window $opencodego_window $nonce)}"
     echo "$string"
 }
 
@@ -111,31 +116,25 @@ saved_binding() {
 
 bind_mouse() {
     local menu="$CURRENT_DIR/scripts/usage_menu.sh"
-    local popup="display-popup -w 80% -h 80% -E"
-    local left right context
+    local left right
 
     left="$(saved_binding MouseDown1Status @agent_usage_saved_mouse1 'select-window -t =')"
     right="$(saved_binding MouseDown3Status @agent_usage_saved_mouse3 'select-window -t =')"
 
     # -O keeps the menu up when the mouse button is released again; without it
     # the click that opens it would close it right away.
-    context="display-menu -O -T '#[align=centre] #{s/^au-//:#{mouse_status_range}} usage ' -x M -y S \
-        'Detailed stats' s \"$popup '$menu stats #{mouse_status_range}'\" \
-        '' \
-        '5-hour window'  5 \"run-shell -b '$menu window #{mouse_status_range} 5h'\" \
-        'Weekly window'  w \"run-shell -b '$menu window #{mouse_status_range} weekly'\" \
-        'Refresh now'    r \"run-shell -b '$menu refresh'\""
-
     tmux bind-key -n MouseDown1Status if-shell -F "$ON_BAR" \
-        "run-shell -b '$menu toggle #{mouse_status_range}'" "$left"
+        "run-shell -b '\"$menu\" toggle #{mouse_status_range}'" "$left"
 
-    tmux bind-key -n MouseDown3Status if-shell -F "$ON_BAR" "$context" "$right"
+    tmux bind-key -n MouseDown3Status if-shell -F "$ON_BAR" \
+        "run-shell '\"$menu\" menu #{mouse_status_range}'" "$right"
 }
 
 main() {
-    tmux set-option -g status-interval 20
     ensure_option @agent_usage_window_claude "5h"
     ensure_option @agent_usage_window_codex "5h"
+    ensure_option @agent_usage_window_copilot "monthly"
+    ensure_option @agent_usage_window_opencodego "5h"
     ensure_option @agent_usage_nonce "0"
     update_tmux_option "status-right"
     update_tmux_option "status-left"

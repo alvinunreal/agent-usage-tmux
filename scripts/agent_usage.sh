@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: agent_usage.sh [claude|codex] [5h|weekly]
+# Usage: agent_usage.sh [claude|codex|copilot|opencodego] [5h|weekly|monthly] [nonce]
 #        agent_usage.sh both [claude-window] [codex-window]
 # Defaults to showing both bars when no argument is given.
 #
@@ -15,28 +15,16 @@
 AGENT="${1:-}"
 WINDOW="${2:-}"
 
-declare -A ICONS=(
-    [claude]="✻"
-    [codex]=">_"
-)
-
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-declare -A DEFAULTS=(
-    [claude]="python3 $SCRIPT_DIR/fetch_claude_usage.py"
-    [codex]="python3 $SCRIPT_DIR/fetch_codex_usage.py"
-)
-
-declare -A DEFAULT_RESETS=(
-    [claude]="python3 $SCRIPT_DIR/fetch_claude_usage.py --field reset_in"
-    [codex]="python3 $SCRIPT_DIR/fetch_codex_usage.py --field reset_in"
-)
-
-# Both fetchers know two windows, they just spell them differently.
-declare -A WINDOW_FLAGS=(
-    [claude:5h]="5h"      [claude:weekly]="7d"
-    [codex:5h]="primary"  [codex:weekly]="secondary"
-)
+icon_for() {
+    case "$1" in
+        claude) printf '✻' ;;
+        codex) printf '>_' ;;
+        copilot) printf 'GH' ;;
+        opencodego) printf 'Go' ;;
+    esac
+}
 
 # 5h unless the argument or the tmux option says otherwise.
 get_window() {
@@ -47,8 +35,10 @@ get_window() {
         window="$(tmux show-option -gqv "@agent_usage_window_${agent}" 2>/dev/null)"
     fi
 
+    [[ "$agent" == "copilot" ]] && { echo "monthly"; return; }
     case "$window" in
         weekly|week|7d|secondary) echo "weekly" ;;
+        monthly) [[ "$agent" == "opencodego" ]] && echo "monthly" || echo "5h" ;;
         *)                        echo "5h" ;;
     esac
 }
@@ -70,35 +60,15 @@ show_icons() {
     return 0
 }
 
-# The window flag only goes to the built-in fetchers - a command someone
-# configured themselves is called exactly as they wrote it.
-get_percentage() {
+custom_command() {
     local agent="$1"
-    local window="$2"
+    local kind="$2"
     local cmd
-    cmd="$(tmux show-option -gqv "@agent_usage_cmd_${agent}" 2>/dev/null)"
+    cmd="$(tmux show-option -gqv "@agent_usage_${kind}_${agent}" 2>/dev/null)"
     if [[ -z "$cmd" ]]; then
-        # fall back to legacy @agent_usage_cmd for claude
-        [[ "$agent" == "claude" ]] && cmd="$(tmux show-option -gqv @agent_usage_cmd 2>/dev/null)"
+        [[ "$agent" == "claude" ]] && cmd="$(tmux show-option -gqv "@agent_usage_${kind}" 2>/dev/null)"
     fi
-    if [[ -z "$cmd" ]]; then
-        cmd="${DEFAULTS[$agent]} --window ${WINDOW_FLAGS[${agent}:${window}]}"
-    fi
-    eval "$cmd" 2>/dev/null || echo "0"
-}
-
-get_reset_in() {
-    local agent="$1"
-    local window="$2"
-    local cmd
-    cmd="$(tmux show-option -gqv "@agent_usage_reset_cmd_${agent}" 2>/dev/null)"
-    if [[ -z "$cmd" ]]; then
-        [[ "$agent" == "claude" ]] && cmd="$(tmux show-option -gqv @agent_usage_reset_cmd 2>/dev/null)"
-    fi
-    if [[ -z "$cmd" ]]; then
-        cmd="${DEFAULT_RESETS[$agent]} --window ${WINDOW_FLAGS[${agent}:${window}]}"
-    fi
-    eval "$cmd" 2>/dev/null || echo "0"
+    printf '%s' "$cmd"
 }
 
 # HH:MM as before; the weekly window resets days away, where '3d04h' beats
@@ -107,7 +77,7 @@ format_reset() {
     local reset_in="$1"
     local days hours minutes
 
-    [[ "$reset_in" =~ ^[0-9]+$ ]] || reset_in=0
+    [[ "$reset_in" =~ ^[0-9]+$ ]] || { printf -- '--:--'; return; }
     days=$(( reset_in / 86400 ))
     hours=$(( (reset_in % 86400) / 3600 ))
     minutes=$(( (reset_in % 3600) / 60 ))
@@ -141,6 +111,8 @@ render_bar() {
     case "$agent" in
         claude) color="colour214" ;;  # orange
         codex)  color="colour250" ;;  # soft light gray
+        copilot) color="colour117" ;;
+        opencodego) color="colour114" ;;
         *)
             if   (( pct >= 80 )); then color="colour160"
             elif (( pct >= 50 )); then color="colour214"
@@ -164,12 +136,13 @@ render_bar() {
 
     local icon_prefix=""
     if show_icons; then
-        icon_prefix="${ICONS[$agent]} "
+        icon_prefix="$(icon_for "$agent") "
     fi
 
     # 'w' in front of the percentage: the bar is showing the weekly window.
     local window_tag=""
     [[ "$window" == "weekly" ]] && window_tag="w"
+    [[ "$window" == "monthly" ]] && window_tag="m"
 
     printf "#[fg=%s,bold]%s%s%d%%#[default] #[fg=%s,bg=%s]%s%s#[fg=%s,bg=%s]%s#[default] #[fg=%s,bold]%s#[default]" \
         "$color" "$icon_prefix" "$window_tag" "$pct" "$color" "$empty_bg" "$bar_on" "$partial" "$empty_bg" "$empty_bg" "$bar_off" "$color" "$reset_label"
@@ -181,26 +154,68 @@ render_agent() {
     local pct
     local reset_in
     local reset_label
+    local data pct_cmd reset_cmd actual_window failed=0
+    local nonce="${3:-0}"
     window=$(get_window "$agent" "${2:-}")
-    pct=$(get_percentage "$agent" "$window")
-    reset_in=$(get_reset_in "$agent" "$window")
-    reset_label=$(format_reset "$reset_in")
+    pct_cmd="$(custom_command "$agent" cmd)"
+    reset_cmd="$(custom_command "$agent" reset_cmd)"
+    # One cached snapshot provides percentage and reset, for every built-in window.
+    if [[ -z "$pct_cmd" || -z "$reset_cmd" ]]; then
+        if data="$(python3 "$SCRIPT_DIR/usage_data.py" "$agent" --window "$window" --nonce "$nonce")"; then
+            IFS=$'\t' read -r pct reset_in actual_window <<< "$data"
+            [[ -n "$actual_window" ]] && window="$actual_window"
+        else
+            failed=1
+        fi
+    fi
+    if [[ -n "$pct_cmd" ]]; then
+        if pct="$(bash -c "$pct_cmd")"; then
+            [[ -n "$reset_cmd" ]] && failed=0
+        else
+            failed=1
+        fi
+    fi
+    if [[ -n "$reset_cmd" ]]; then
+        if ! reset_in="$(bash -c "$reset_cmd")"; then failed=1; fi
+    fi
 
     # Mouse range around the whole bar: a click in here reaches the bindings
     # in agent-usage.tmux with #{mouse_status_range} = 'au-<agent>'. Only
     # '#[norange]' ends it - the '#[default]' inside just resets the colours.
     # (No colon in the name: tmux's #{s/…/…/:…} splits its arguments on it.)
     printf "#[range=user|au-%s]" "$agent"
-    render_bar "$agent" "$pct" "$reset_label" "$window"
+    if (( failed )); then
+        printf '#[fg=colour160]%s N/A#[default]' "$(icon_for "$agent")"
+    elif [[ "$pct" == "status" ]]; then
+        printf '#[fg=colour117]%s %s#[default]' "$(icon_for "$agent")" "$reset_in"
+    elif [[ "$pct" =~ ^[0-9]+$ && ${#pct} -le 3 && "$pct" -le 100 ]] &&
+         [[ "$reset_in" == "-" || "$reset_in" =~ ^[0-9]+$ ]]; then
+        reset_label=$(format_reset "$reset_in")
+        render_bar "$agent" "$((10#$pct))" "$reset_label" "$window"
+    else
+        printf 'invalid usage output for %s\n' "$agent" >&2
+        printf '#[fg=colour160]%s N/A#[default]' "$(icon_for "$agent")"
+    fi
     printf "#[norange]"
 }
 
 case "$AGENT" in
-    claude|codex) render_agent "$AGENT" "$WINDOW" ;;
-    *)
-        # Both bars: second argument is claude's window, third codex's.
-        render_agent "claude" "$WINDOW"
-        printf " "
-        render_agent "codex" "${3:-}"
+    claude|codex|copilot|opencodego) render_agent "$AGENT" "$WINDOW" "${3:-0}" ;;
+    all)
+        nonce="${6:-0}"
+        render_agent claude "$WINDOW" "$nonce"
+        printf " | "
+        render_agent codex "${3:-}" "$nonce"
+        printf " | "
+        render_agent copilot monthly "$nonce"
+        printf " | "
+        render_agent opencodego "${5:-}" "$nonce"
         ;;
+    ""|both)
+        # Both bars: second argument is claude's window, third codex's.
+        render_agent "claude" "$WINDOW" "${4:-0}"
+        printf " "
+        render_agent "codex" "${3:-}" "${4:-0}"
+        ;;
+    *) printf 'unknown provider: %s\n' "$AGENT" >&2; exit 1 ;;
 esac

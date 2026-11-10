@@ -6,6 +6,19 @@ When working in this repo, document any major concepts you introduce or discover
 
 ---
 
+## Fork provider integration
+
+- `scripts/usage_data.py` owns read-only provider collection, normalized quota windows, and the shared two-minute cache. Error snapshots expire after 30 seconds.
+- `scripts/agent_usage.sh` supports macOS Bash 3.2 and renders Claude, Codex, Copilot, and OpenCode Go. It must not convert failed fetches into zero-percent bars.
+- `scripts/usage_stats.py` uses the same cache for the dashboard. `scripts/usage_popup.sh` opens the output in `less -R`.
+- `references/CodexBar` is a pinned API/authentication reference, not a runtime dependency. The upstream remote remains `artischocki/agent-usage-tmux`.
+- Claude usage comes from the read-only OAuth usage endpoint. Never send model requests to poll quota.
+- Copilot exposes monthly premium quotas and AI credits. Never invent an allowance for unlimited or token-only snapshots.
+- OpenCode Go credentials are read from the active CLI SQLite credential table. Never fall back to legacy credentials after a v2 logout or refresh tokens automatically.
+- Run `python3 -m unittest discover -s tests -v` and `shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh` after changes.
+
+---
+
 ## Frontend
 
 **Branch:** `frontend` (worktree at `.claude/worktrees/frontend`)

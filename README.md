@@ -1,6 +1,53 @@
 # agent-usage-tmux
 
-Tmux status bar plugin for showing Claude and Codex usage as compact progress bars.
+Tmux status bar plugin for Claude, Codex, GitHub Copilot, and OpenCode Go account quotas.
+
+## This fork
+
+- The fork lives at `alvinunreal/agent-usage-tmux`, with `artischocki/agent-usage-tmux` as upstream.
+- `references/CodexBar` is a pinned, read-only reference submodule for provider APIs and authentication. It is not a runtime dependency.
+- The plugin needs tmux 3.4+, Python 3.10+, Bash 3.2+, and `less` for the dashboard. No Python packages are needed.
+- The built-in fetchers only read usage. Claude polling does not send prompts or consume model tokens.
+- All bars show **remaining** allowance. A red `N/A` means fetching failed, not that the quota is exhausted. The dashboard shows the error.
+
+## Local installation
+
+```bash
+git clone --recurse-submodules https://github.com/alvinunreal/agent-usage-tmux.git ~/repos/tmux-agent-usage
+```
+
+Add these lines to `~/.tmux.conf`:
+
+```tmux
+set -g status-right "#{claude_usage} | #{codex_usage} | #{copilot_usage} | #{opencodego_usage} "
+run-shell ~/repos/tmux-agent-usage/agent-usage.tmux
+bind u display-popup -w 90% -h 80% -T " Agent usage " -E 'bash "$HOME/repos/tmux-agent-usage/scripts/usage_popup.sh"'
+```
+
+- Reload with `tmux source-file ~/.tmux.conf` from a running tmux server.
+- Press your prefix, then **u**, to open the dashboard. Scroll with arrows or Page Up/Down, and press **q** to close.
+- `#{agent_usage}` retains the original Claude/Codex pair. `#{agent_usage_all}` displays all four.
+- The dashboard and bars share one private cache per provider in `${XDG_CACHE_HOME:-~/.cache}/agent-usage-tmux`. Successful snapshots last 120 seconds; failures last 30 seconds. Credentials are never cached.
+- Right-click **Refresh now** bypasses the cached snapshots. Switching windows reuses the current snapshot.
+- The plugin preserves your `status-interval`, existing bindings outside usage bars, and mouse preference.
+
+## Authentication and windows
+
+| Provider | Credentials | Windows |
+|---|---|---|
+| Claude | Existing `~/.claude/.credentials.json` OAuth login. | Five-hour and weekly. |
+| Codex | Existing `~/.codex/auth.json` access token and account ID. | Windows reported by the account; a single weekly window is labeled weekly, not five-hour. |
+| Copilot | `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`. | Monthly premium interactions / AI credits. |
+| OpenCode Go | `OPENCODE_GO_API_KEY`, then the active OpenCode CLI credential. | Five-hour, weekly, and monthly when reported. |
+
+- Copilot uses GitHub's internal usage API. A token must have Copilot access; a generic PAT may be rejected. Run `gh auth login` with the intended GitHub account or supply a suitable OAuth token.
+- Copilot shows credit usage without inventing a percentage when the API supplies no metered allowance. Unlimited plans are labeled explicitly.
+- OpenCode Go reads the CLI's v2 `credential` SQLite table in read-only mode. Active `opencode-go` credentials take precedence over `opencode`; ambiguous or expired logins report an error.
+- Legacy OpenCode Go API credentials in `auth.json` are used only when there is no v2 credential table. A v2 logout never resurrects stale legacy credentials.
+- `XDG_DATA_HOME` and `OPENCODE_DB` follow the OpenCode CLI path conventions. Tokens are reread on each uncached fetch; this plugin does not renew or modify them.
+- Use `@agent_usage_window_copilot monthly` and `@agent_usage_window_opencodego 5h|weekly|monthly` to select the new provider windows. A monthly bar has an `m` prefix; a weekly bar has `w`.
+- Clicking Copilot keeps its monthly view. Clicking OpenCode Go cycles five-hour, weekly, and monthly; the context menu offers each supported window.
+- Custom percentage/reset overrides also support the `copilot` and `opencodego` suffixes. They retain the original shell-command interface and must print numeric output.
 
 ![Plugin preview](docs/preview.png)
 
@@ -9,13 +56,13 @@ Tmux status bar plugin for showing Claude and Codex usage as compact progress ba
 Add the plugin with TPM:
 
 ```tmux
-set -g @plugin 'artischocki/agent-usage-tmux'
+set -g @plugin 'alvinunreal/agent-usage-tmux'
 set -g status-right "#{claude_usage} | #{codex_usage} "
 ```
 
 Then reload tmux or install plugins with TPM.
 
-## What It Shows
+## Original Claude/Codex display
 
 - Remaining usage percentage
 - Time until reset
@@ -46,7 +93,7 @@ Every bar is a mouse range, so tmux can tell which one was hit. Needs
 
   | Entry | Key | Does |
   |-------|-----|------|
-  | Detailed stats | `s` | popup with every window at once: free/used, bar, reset time, status, raw headers |
+  | Detailed stats | `s` | scrollable popup with account windows, remaining quota, reset times, credits, and errors |
   | 5-hour window  | `5` | show that window in the status line |
   | Weekly window  | `w` | show that window in the status line |
   | Refresh now    | `r` | refetch instead of waiting for the next `status-interval` |
@@ -101,6 +148,12 @@ That changes the display to:
 Useful local commands:
 
 ```bash
+python3 -m unittest discover -s tests -v
+shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh
+python3 scripts/usage_data.py copilot --json
+python3 scripts/usage_data.py opencodego --json
+python3 scripts/usage_stats.py all
+
 python3 scripts/fetch_claude_usage.py
 python3 scripts/fetch_claude_usage.py --field reset_in
 python3 scripts/fetch_codex_usage.py

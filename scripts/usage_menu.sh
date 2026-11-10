@@ -19,13 +19,15 @@ AGENT="${2:-claude}"
 AGENT="${AGENT##*[-:]}"
 
 case "$AGENT" in
-    claude|codex) ;;
-    *) AGENT="claude" ;;
+    claude|codex|copilot|opencodego) ;;
+    *) printf 'unknown provider: %s\n' "$AGENT" >&2; exit 1 ;;
 esac
 
 current_window() {
+    [[ "$AGENT" == "copilot" ]] && { echo monthly; return; }
     case "$(tmux show-option -gqv "@agent_usage_window_${AGENT}" 2>/dev/null)" in
         weekly|week|7d|secondary) echo "weekly" ;;
+        monthly) echo "monthly" ;;
         *) echo "5h" ;;
     esac
 }
@@ -47,27 +49,44 @@ wait_for_key() {
 
 case "$ACTION" in
     toggle)
-        if [[ "$(current_window)" == "weekly" ]]; then
-            set_window "5h"
-        else
-            set_window "weekly"
-        fi
+        case "$AGENT:$(current_window)" in
+            copilot:*) set_window monthly ;;
+            opencodego:weekly) set_window monthly ;;
+            *:5h) set_window weekly ;;
+            *) set_window 5h ;;
+        esac
         ;;
     window)
-        set_window "${3:-5h}"
+        case "$AGENT:${3:-5h}" in
+            copilot:monthly|opencodego:monthly|claude:5h|claude:weekly|codex:5h|codex:weekly|opencodego:5h|opencodego:weekly)
+                set_window "${3:-5h}" ;;
+            *) echo "unsupported provider window" >&2; exit 1 ;;
+        esac
+        ;;
+    menu)
+        entries=("Detailed stats" s "display-popup -w 90% -h 80% -E 'bash \"$SCRIPT_DIR/usage_popup.sh\" $AGENT'" "")
+        if [[ "$AGENT" != copilot ]]; then
+            entries+=("5-hour window" 5 "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" window $AGENT 5h'")
+            entries+=("Weekly window" w "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" window $AGENT weekly'")
+        fi
+        if [[ "$AGENT" == copilot || "$AGENT" == opencodego ]]; then
+            entries+=("Monthly window" m "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" window $AGENT monthly'")
+        fi
+        entries+=("Refresh now" r "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" refresh'")
+        tmux display-menu -O -T "$AGENT usage" -x M -y S "${entries[@]}"
         ;;
     refresh)
-        # Same idea as set_window: a new nonce means a new command string,
-        # which is the only way to make tmux re-run the job before the next tick.
+        # A new command string restarts jobs and invalidates their shared snapshots.
         tmux set-option -g @agent_usage_nonce "$(date +%s)"
         tmux refresh-client -S
         ;;
     stats)
-        python3 "$SCRIPT_DIR/usage_stats.py" "$AGENT"
+        python3 "$SCRIPT_DIR/usage_stats.py" "$AGENT" --nonce "$(tmux show-option -gqv @agent_usage_nonce)"
         wait_for_key
         ;;
     *)
         echo "unknown action: $ACTION" >&2
-        echo "expected: toggle, window, stats, refresh" >&2
+        echo "expected: toggle, window, menu, stats, refresh" >&2
+        exit 1
         ;;
 esac

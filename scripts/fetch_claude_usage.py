@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch Claude Code rate-limit utilisation from the Anthropic messages API.
+Fetch Claude Code rate-limit utilisation from the read-only OAuth usage API.
 
 Auth is read from ~/.claude/.credentials.json (claudeAiOauth.accessToken).
 The utilisation percentage for the representative rate-limit window is
@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
-DEFAULT_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_MESSAGES_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--url",
         default=DEFAULT_MESSAGES_URL,
-        help=f"Anthropic messages endpoint (default: {DEFAULT_MESSAGES_URL})",
+        help=f"Anthropic usage endpoint (default: {DEFAULT_MESSAGES_URL})",
     )
     parser.add_argument(
         "--timeout",
@@ -87,19 +87,10 @@ def fetch_rate_limit_headers(
     access_token: str,
     timeout: float,
 ) -> dict:
-    """
-    Make a minimal messages API call and return the rate-limit response headers.
-    Uses claude-haiku (cheapest model) with a 1-token response to minimise cost.
-    """
-    body = json.dumps({
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "0"}],
-    }).encode()
-
+    """Adapt read-only OAuth meters to the existing rate-limit header interface."""
+    from datetime import datetime
     request = Request(
         url,
-        data=body,
         headers={
             "Authorization": f"Bearer {access_token}",
             "anthropic-beta": "oauth-2025-04-20",
@@ -108,21 +99,27 @@ def fetch_rate_limit_headers(
             "Accept": "application/json",
             "User-Agent": "agent-usage-tmux/1.0",
         },
-        method="POST",
+        method="GET",
     )
 
     try:
         with urlopen(request, timeout=timeout) as response:
-            headers = {k.lower(): v for k, v in response.getheaders()}
+            payload = json.load(response)
     except HTTPError as exc:
-        headers = {k.lower(): v for k, v in exc.headers.items()}
-        if any(k.startswith("anthropic-ratelimit-unified") for k in headers):
-            return headers
-        body_text = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"HTTP {exc.code}: {body_text}")
+        raise SystemExit(f"HTTP {exc.code}: check Claude login")
     except URLError as exc:
         raise SystemExit(f"request failed: {exc}")
 
+    headers = {}
+    for source, window in (("five_hour", "5h"), ("seven_day", "7d")):
+        data = payload.get(source)
+        if not isinstance(data, dict):
+            continue
+        prefix = f"anthropic-ratelimit-unified-{window}"
+        headers[f"{prefix}-utilization"] = str(float(data["utilization"]) / 100)
+        if data.get("resets_at"):
+            headers[f"{prefix}-reset"] = str(int(datetime.fromisoformat(
+                data["resets_at"].replace("Z", "+00:00")).timestamp()))
     return headers
 
 
