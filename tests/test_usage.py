@@ -610,7 +610,7 @@ class TmuxIntegrationTests(unittest.TestCase):
                        env=self.environment, capture_output=True, text=True, check=True)
         self.assertEqual(self.tmux("show-option", "-gqv", "@agent_usage_window_copilot").stdout.strip(), "monthly")
 
-    def test_prefix_u_opens_scrollable_dashboard(self):
+    def test_popup_escape_closes_without_breaking_arrow_or_page_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "agent-usage-tmux"
             cache.mkdir()
@@ -621,9 +621,10 @@ class TmuxIntegrationTests(unittest.TestCase):
                 (cache / f"{provider}.json").write_text(json.dumps(data))
             self.tmux("set-environment", "-g", "XDG_CACHE_HOME", directory)
             self.tmux("set-option", "-g", "prefix", "C-a")
+            self.tmux("set-option", "-g", "@usage_popup_closed", "0")
             self.tmux("bind-key", "u", "display-popup", "-w", "90%", "-h", "80%", "-E",
                       "-s", "bg=black,fg=colour252", "-S", "bg=black,fg=colour39",
-                      f'bash "{ROOT}/scripts/usage_popup.sh"')
+                      f'bash "{ROOT}/scripts/usage_popup.sh"; tmux set-option -g @usage_popup_closed 1')
             while select.select([self.master], [], [], 0)[0]:
                 os.read(self.master, 65536)
             os.write(self.master, b"\x01u")
@@ -638,8 +639,20 @@ class TmuxIntegrationTests(unittest.TestCase):
                 self.assertIn(b"AGENT USAGE", output)
                 self.assertIn(b"Copilot", output)
                 self.assertIn(b"Monthly", output)
+                for sequence in (b"\x1b[B", b"\x1b[A", b"\x1b[6~", b"\x1b[5~"):
+                    os.write(self.master, sequence)
+                    time.sleep(0.1)
+                    self.assertEqual(self.tmux("show-option", "-gqv", "@usage_popup_closed").stdout.strip(), "0", sequence)
+                os.write(self.master, b"\x1b")
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if self.tmux("show-option", "-gqv", "@usage_popup_closed").stdout.strip() == "1":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(self.tmux("show-option", "-gqv", "@usage_popup_closed").stdout.strip(), "1")
             finally:
-                os.write(self.master, b"q")
+                if self.tmux("show-option", "-gqv", "@usage_popup_closed").stdout.strip() == "0":
+                    os.write(self.master, b"q")
                 self.tmux("set-environment", "-gu", "XDG_CACHE_HOME")
 
 

@@ -101,7 +101,7 @@ def main() -> None:
     print(f"\n  {DIM}{'Window':<32} {'Left':>4}  {'':<{BAR_WIDTH}}    Resets in{RESET}")
     for provider in providers:
         provider_page(provider, cached_usage(provider, args.nonce))
-    print(f"\n{DIM}Read-only usage · cached for 2 minutes · arrows scroll · q closes{RESET}")
+    print(f"\n{DIM}Read-only usage · cached for 2 minutes · arrows scroll · Esc / q closes{RESET}")
 
 
 if __name__ == "__main__":
