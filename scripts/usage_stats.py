@@ -15,10 +15,17 @@ DIM = "\033[2m"
 ACCENT = "\033[38;5;117m"
 ORANGE = "\033[38;5;214m"
 RED = "\033[38;5;160m"
+BAR_WIDTH = 16
 
 
 def colour_for(remaining: int) -> str:
     return RED if remaining <= 20 else ORANGE if remaining <= 50 else ACCENT
+
+
+def bar(remaining: int) -> str:
+    filled = round(max(0, min(100, remaining)) * BAR_WIDTH / 100)
+    return (f"{colour_for(remaining)}{'█' * filled}"
+            f"{DIM}{'░' * (BAR_WIDTH - filled)}{RESET}")
 
 
 def fmt_delta(seconds: int) -> str:
@@ -53,7 +60,7 @@ def provider_page(provider: str, data: dict) -> None:
             delta = fmt_delta(reset_at - int(time.time()))
             reset = f"{delta:<8} {date:%b %d %H:%M}"
         print(f"  {selected['label']:<32} {colour_for(pct)}{BOLD}{pct:3d}%{RESET}"
-              f"    {DIM}{reset}{RESET}")
+              f"  {bar(pct)}    {DIM}{reset}{RESET}")
     if data.get("credits_used") is not None:
         print(f"  {DIM}{data['credits_used']:,.0f} AI credits used this month{RESET}")
     elif not data["windows"]:
@@ -69,7 +76,7 @@ def main() -> None:
     args = parser.parse_args()
     providers = PROVIDERS if args.provider == "all" else (args.provider,)
     print(f"{BOLD}AGENT USAGE{RESET}  {DIM}Account quotas · remaining allowance{RESET}", flush=True)
-    print(f"\n  {DIM}{'Window':<32} {'Left':>4}    Resets in{RESET}")
+    print(f"\n  {DIM}{'Window':<32} {'Left':>4}  {'':<{BAR_WIDTH}}    Resets in{RESET}")
     for provider in providers:
         provider_page(provider, cached_usage(provider, args.nonce))
     print(f"\n{DIM}Read-only usage · cached for 2 minutes · arrows scroll · q closes{RESET}")

@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import fetch_claude_usage as claude
 import usage_data as usage
 import usage_top as top
+import usage_stats as stats
 
 
 class ParsingTests(unittest.TestCase):
@@ -344,6 +345,20 @@ class CacheTests(unittest.TestCase):
 
 
 class MinimalDisplayTests(unittest.TestCase):
+    def test_popup_progress_bars_show_remaining_allowance(self):
+        for remaining, expected in (
+            (0, "░" * 16),
+            (50, "█" * 8 + "░" * 8),
+            (100, "█" * 16),
+        ):
+            with self.subTest(remaining=remaining), contextlib.redirect_stdout(io.StringIO()) as output:
+                stats.provider_page("claude", {
+                    "windows": {"5h": usage.meter(remaining, None, "5 hours")},
+                })
+                text = top.ANSI.sub("", output.getvalue())
+                self.assertIn(f"{remaining}%", text)
+                self.assertIn(expected, text)
+
     def test_top_strip_uses_consistent_names_and_fits_narrow_terminals(self):
         sections = {
             provider: f"\033[37m{label} \033[36m100%\033[0m" +

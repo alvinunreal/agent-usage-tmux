@@ -21,6 +21,7 @@ When working in this repo, document any major concepts you introduce or discover
 - `@agent_usage_top on` uses `scripts/usage_top.py` to maintain a one-line top pane while leaving normal status options untouched. Hook index 1900 owns pane creation, layout repair, and focus redirection; disabling the option removes only marked usage panes.
 - Minimal strip labels are Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Use percentages without icons or window-letter prefixes, show `--` for unknown usage, and include Claude/Codex reset countdowns.
 - Usage popup bindings use explicit black background and blue border styles, with lowercase prefix `u`.
+- Keep progress bars in the details popup while leaving the top usage strip text-only.
 - Run `python3 -m unittest discover -s tests -v` and `shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh` after changes.
 
 ---
