@@ -86,7 +86,7 @@ def meter(remaining, reset_at, label: str) -> dict:
             "reset_at": timestamp(reset_at), "label": label}
 
 
-def request_json(url: str, token: str, headers=None, scheme="Bearer") -> dict:
+def request_json(url: str, token: str, headers=None, scheme="Bearer", timeout=15) -> dict:
     request = Request(url, headers={
         "Authorization": f"{scheme} {token}",
         "Accept": "application/json",
@@ -94,7 +94,7 @@ def request_json(url: str, token: str, headers=None, scheme="Bearer") -> dict:
         **(headers or {}),
     })
     try:
-        with build_opener(NoRedirect()).open(request, timeout=15) as response:
+        with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
             value = json.load(response)
     except HTTPError as exc:
         # Never put raw API bodies (which can include account data) in the cache.
@@ -236,6 +236,23 @@ def parse_opencode(payload: dict, now: float) -> dict:
         # The API reports 0...100, not fractions: 0.5 means 0.5% used.
         windows[window] = meter(100 - number(used), reset, label)
     return {"windows": windows}
+
+
+def parse_codex_reset_credits(payload: dict, now: float) -> list[dict]:
+    credits = payload.get("credits")
+    if not isinstance(credits, list):
+        raise UsageError("Codex reset inventory is missing its credit list")
+    available = []
+    for credit in credits:
+        if not isinstance(credit, dict):
+            raise UsageError("invalid Codex reset-credit record")
+        if credit.get("status") != "available":
+            continue
+        expires_at = timestamp(credit.get("expires_at"))
+        if expires_at is None or expires_at > now:
+            available.append({"expires_at": expires_at})
+    return sorted(available, key=lambda credit: (
+        credit["expires_at"] is None, credit["expires_at"] or 0))
 
 
 def grok_token() -> str:
@@ -448,7 +465,20 @@ def fetch_provider(provider: str) -> dict:
                 windows[key] = meter(pct, reset, label)
         if not windows:
             raise UsageError("Codex returned no usage windows")
-        return {"windows": windows}
+        data = {"windows": windows}
+        try:
+            inventory = request_json(
+                "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+                token, {
+                    "ChatGPT-Account-ID": account, "OpenAI-Beta": "codex-1",
+                    "originator": "Codex Desktop",
+                }, timeout=4)
+            data["reset_credits"] = parse_codex_reset_credits(inventory, time.time())
+        except (UsageError, OSError, ValueError) as exc:
+            data["reset_credits_error"] = (
+                str(exc) if isinstance(exc, UsageError)
+                else f"cannot read reset inventory ({type(exc).__name__})")
+        return data
     raise UsageError(f"unknown provider: {provider}")
 
 

@@ -23,6 +23,7 @@ When working in this repo, document any major concepts you introduce or discover
 - Usage popup bindings use explicit black background and blue border styles, with lowercase prefix `u`.
 - Keep progress bars in the details popup while leaving the top usage strip text-only.
 - The recommended top-strip configuration selects weekly quotas for Claude, Codex, OpenCode Go, and Antigravity. Keep Copilot monthly and Grok on its reported credit period.
+- Codex popup reset credits come from the read-only account-scoped `wham/rate-limit-reset-credits` endpoint. Count only available, unexpired credits, recheck expiry when rendering, and keep inventory failures separate from quota failures. Never redeem resets.
 - Run `python3 -m unittest discover -s tests -v` and `shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh` after changes.
 
 ---

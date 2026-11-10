@@ -36,6 +36,7 @@ bind u display-popup -w 90% -h 80% -T " Agent usage " -s "bg=black,fg=colour252"
 - The strip uses consistent names: Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Each provider shows its reported reset countdown in parentheses. Wider terminals show all details; narrow terminals omit countdowns to keep provider names visible.
 - The configuration above selects weekly remaining quotas for Claude, Codex, OpenCode, and Gemini. Copilot retains its monthly allowance; Grok uses its reported credit period. The popup still shows every supported window.
 - The black popup uses aligned window, remaining-percentage, progress-bar, and reset columns. It includes all supported windows, credit details, and actionable errors.
+- Codex details also show available usage-reset credits and each expiry date/countdown. This inventory is read-only and never redeems a reset; unavailable inventory is reported separately from quota errors.
 - New windows get the usage pane automatically. Reloads do not duplicate it; layout changes and resizes keep it at the top. Zooming a work pane temporarily hides it.
 - Set `@agent_usage_top off` and reload the plugin to remove usage panes and their lifecycle hooks. Normal work panes and status options are left untouched.
 - Individual placeholders remain available for traditional status-left/right layouts: `#{claude_usage}`, `#{codex_usage}`, `#{copilot_usage}`, `#{opencodego_usage}`, `#{antigravity_usage}`, and `#{grok_usage}`.

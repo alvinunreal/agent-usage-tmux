@@ -165,11 +165,43 @@ class ParsingTests(unittest.TestCase):
             "reset_at": 2000000000, "reset_after_seconds": 600,
         }}}
         with patch.object(usage.codex, "load_auth", return_value=("token", "account")), \
-             patch.object(usage.codex, "fetch_usage", return_value=payload):
+             patch.object(usage.codex, "fetch_usage", return_value=payload), \
+             patch.object(usage, "request_json", return_value={"credits": []}):
             data = usage.fetch_provider("codex")
         self.assertEqual(list(data["windows"]), ["weekly"])
         self.assertEqual(data["windows"]["weekly"]["label"], "Weekly")
         self.assertEqual(data["windows"]["weekly"]["remaining"], 0)
+
+    def test_codex_reset_inventory_keeps_only_available_unexpired_credits(self):
+        result = usage.parse_codex_reset_credits({"credits": [
+            {"status": "available", "expires_at": None},
+            {"status": "available", "expires_at": "2026-12-01T00:00:00Z"},
+            {"status": "available", "expires_at": "2026-11-30T00:00:00Z"},
+            {"status": "available", "expires_at": "2000-01-01T00:00:00Z"},
+            {"status": "redeemed", "expires_at": "2026-12-01T00:00:00Z"},
+            {"status": "redeeming", "expires_at": "2026-12-01T00:00:00Z"},
+            {"status": "expired", "expires_at": "2026-12-01T00:00:00Z"},
+            {"status": "unknown", "expires_at": "2026-12-01T00:00:00Z"},
+        ]}, now=1794330000)
+        self.assertEqual(result, [
+            {"expires_at": 1795996800}, {"expires_at": 1796083200}, {"expires_at": None},
+        ])
+        for payload in ({}, {"credits": None}, {"credits": [None]}):
+            with self.subTest(payload=payload), self.assertRaises(usage.UsageError):
+                usage.parse_codex_reset_credits(payload, now=1794330000)
+
+    def test_codex_reset_inventory_failure_preserves_quota_and_surfaces_error(self):
+        payload = {"rate_limit": {"primary_window": {
+            "limit_window_seconds": 604800, "used_percent": 20,
+            "reset_at": 2000000000, "reset_after_seconds": 600,
+        }}}
+        with patch.object(usage.codex, "load_auth", return_value=("token", "account")), \
+             patch.object(usage.codex, "fetch_usage", return_value=payload), \
+             patch.object(usage, "request_json", side_effect=usage.UsageError("HTTP 403")):
+            data = usage.fetch_provider("codex")
+        self.assertEqual(data["windows"]["weekly"]["remaining"], 80)
+        self.assertEqual(data["reset_credits_error"], "HTTP 403")
+        self.assertNotIn("reset_credits", data)
 
 
 class CredentialTests(unittest.TestCase):
@@ -345,6 +377,24 @@ class CacheTests(unittest.TestCase):
 
 
 class MinimalDisplayTests(unittest.TestCase):
+    def test_codex_popup_lists_reset_count_expiries_and_hides_newly_expired_credits(self):
+        with patch.object(stats.time, "time", return_value=1794330000), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            stats.provider_page("codex", {
+                "windows": {"weekly": usage.meter(0, None, "Weekly")},
+                "reset_credits": [
+                    {"expires_at": 1796083200},
+                    {"expires_at": 1000},
+                    {"expires_at": None},
+                ],
+            })
+        text = top.ANSI.sub("", output.getvalue())
+        self.assertIn("Usage resets  2 available", text)
+        self.assertIn("Reset 1  expires", text)
+        self.assertIn("2026", text)
+        self.assertIn("Reset 2  expiry not reported", text)
+        self.assertNotIn("1970", text)
+
     def test_popup_progress_bars_show_remaining_allowance(self):
         for remaining, expected in (
             (0, "░" * 16),

@@ -43,6 +43,26 @@ def fmt_delta(seconds: int) -> str:
     return f"{minutes}m" if minutes else "<1m"
 
 
+def reset_credits_page(data: dict) -> None:
+    if data.get("reset_credits_error"):
+        print(f"  {ORANGE}Usage resets unavailable: {data['reset_credits_error']}{RESET}")
+    elif "reset_credits" in data:
+        now = int(time.time())
+        credits = [
+            credit for credit in data["reset_credits"]
+            if credit["expires_at"] is None or credit["expires_at"] > now
+        ]
+        print(f"  {BOLD}Usage resets{RESET}  {len(credits)} available")
+        for index, credit in enumerate(credits, 1):
+            expiry = credit["expires_at"]
+            if expiry is None:
+                description = "expiry not reported"
+            else:
+                date = datetime.fromtimestamp(expiry)
+                description = f"expires {date:%b %d %Y, %H:%M}  ({fmt_delta(expiry - now)} left)"
+            print(f"    {DIM}Reset {index}  {description}{RESET}")
+
+
 def provider_page(provider: str, data: dict) -> None:
     print(f"\n{BOLD}{LABELS[provider]}{RESET}", flush=True)
     if data.get("error"):
@@ -61,6 +81,8 @@ def provider_page(provider: str, data: dict) -> None:
             reset = f"{delta:<8} {date:%b %d %H:%M}"
         print(f"  {selected['label']:<32} {colour_for(pct)}{BOLD}{pct:3d}%{RESET}"
               f"  {bar(pct)}    {DIM}{reset}{RESET}")
+    if provider == "codex":
+        reset_credits_page(data)
     if data.get("credits_used") is not None:
         print(f"  {DIM}{data['credits_used']:,.0f} AI credits used this month{RESET}")
     elif not data["windows"]:
