@@ -22,6 +22,10 @@ Add these lines to `~/.tmux.conf`:
 set -g status-right ""
 set -g status-position bottom
 set -g @agent_usage_top on
+set -g @agent_usage_window_claude weekly
+set -g @agent_usage_window_codex weekly
+set -g @agent_usage_window_opencodego weekly
+set -g @agent_usage_window_antigravity weekly
 run-shell ~/repos/tmux-agent-usage/agent-usage.tmux
 bind u display-popup -w 90% -h 80% -T " Agent usage " -s "bg=black,fg=colour252" -S "bg=black,fg=colour39" -E 'bash "$HOME/repos/tmux-agent-usage/scripts/usage_popup.sh"'
 ```
@@ -29,7 +33,8 @@ bind u display-popup -w 90% -h 80% -T " Agent usage " -s "bg=black,fg=colour252"
 - Reload with `tmux source-file ~/.tmux.conf` from a running tmux server.
 - Press your prefix, then **u**, to open the dashboard. Scroll with arrows or Page Up/Down, and press **q** to close.
 - `@agent_usage_top on` adds a one-line, non-interactive usage pane at the top of each window. Your normal status bar stays at the bottom, unchanged. The pane takes one content line plus its separator.
-- The strip uses consistent names: Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Claude and Codex also show reset countdowns in parentheses. Wider terminals show all details; narrow terminals omit countdowns to keep provider names visible.
+- The strip uses consistent names: Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Each provider shows its reported reset countdown in parentheses. Wider terminals show all details; narrow terminals omit countdowns to keep provider names visible.
+- The configuration above selects weekly remaining quotas for Claude, Codex, OpenCode, and Gemini. Copilot retains its monthly allowance; Grok uses its reported credit period. The popup still shows every supported window.
 - The black popup uses aligned window, remaining-percentage, progress-bar, and reset columns. It includes all supported windows, credit details, and actionable errors.
 - New windows get the usage pane automatically. Reloads do not duplicate it; layout changes and resizes keep it at the top. Zooming a work pane temporarily hides it.
 - Set `@agent_usage_top off` and reload the plugin to remove usage panes and their lifecycle hooks. Normal work panes and status options are left untouched.

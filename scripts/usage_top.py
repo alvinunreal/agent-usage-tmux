@@ -109,7 +109,7 @@ def ansi_usage(text: str) -> str:
 
 def compact_line(sections: dict[str, str], width: int) -> str:
     values = [sections.get(provider, f"{NAMES[provider]} --") for provider in PROVIDERS]
-    line = " Remaining  " + "  |  ".join(values)
+    line = "  |  ".join(values)
     if len(ANSI.sub("", line)) > width:
         line = " | ".join(values)
     if len(ANSI.sub("", line)) > width:

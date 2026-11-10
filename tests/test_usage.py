@@ -369,6 +369,7 @@ class MinimalDisplayTests(unittest.TestCase):
         narrow = top.ANSI.sub("", top.compact_line(sections, 80))
         self.assertIn("Claude 100% (2d14h)", wide)
         self.assertIn("Codex 100% (2d14h)", wide)
+        self.assertNotIn("Remaining", wide)
         self.assertLessEqual(len(narrow), 80)
         for label in top.NAMES.values():
             self.assertIn(label, narrow)
@@ -438,7 +439,7 @@ class TmuxIntegrationTests(unittest.TestCase):
         self.assertIn("GH m50%", result.stdout)
         self.assertNotIn("N/A", result.stdout)
 
-    def test_new_provider_compact_labels_and_unknown_status(self):
+    def test_new_provider_compact_labels_and_reset_countdowns(self):
         for provider, window, text in (
             ("antigravity", "weekly", "Gemini"), ("grok", "credits", "Grok"),
         ):
@@ -449,10 +450,10 @@ class TmuxIntegrationTests(unittest.TestCase):
             self.assertIn("50%", result.stdout)
             self.assertNotIn("w50%", result.stdout)
             self.assertNotIn("█", result.stdout)
-            self.assertNotIn("01:00", result.stdout)
+            self.assertIn("(1h)", result.stdout)
 
-    def test_claude_and_codex_compact_bars_include_reset_countdowns(self):
-        for provider in ("claude", "codex"):
+    def test_all_compact_providers_include_reported_reset_countdowns(self):
+        for provider in usage.PROVIDERS:
             result = subprocess.run(
                 ["/bin/bash", str(ROOT / "scripts/agent_usage.sh"), provider, "5h", "0", "compact"],
                 env=self.environment, capture_output=True, text=True, check=True)

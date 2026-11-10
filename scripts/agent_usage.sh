@@ -135,9 +135,7 @@ render_bar() {
         (( pct <= 50 )) && quota_color=colour214
         (( pct <= 20 )) && quota_color=colour203
         printf '#[fg=colour252]%s #[fg=%s,bold]%d%%#[default]' "$(label_for "$agent")" "$quota_color" "$pct"
-        case "$agent" in
-            claude|codex) printf ' #[fg=colour244](%s)#[default]' "$reset_label" ;;
-        esac
+        [[ "$reset_label" == "--" ]] || printf ' #[fg=colour244](%s)#[default]' "$reset_label"
         return
     fi
 
