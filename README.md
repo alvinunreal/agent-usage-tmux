@@ -1,6 +1,6 @@
 # agent-usage-tmux
 
-Tmux status bar plugin for Claude, Codex, GitHub Copilot, and OpenCode Go account quotas.
+Tmux status bar plugin for Claude, Codex, GitHub Copilot, OpenCode Go, Antigravity, and Grok account quotas.
 
 ## This fork
 
@@ -8,7 +8,7 @@ Tmux status bar plugin for Claude, Codex, GitHub Copilot, and OpenCode Go accoun
 - `references/CodexBar` is a pinned, read-only reference submodule for provider APIs and authentication. It is not a runtime dependency.
 - The plugin needs tmux 3.4+, Python 3.10+, Bash 3.2+, and `less` for the dashboard. No Python packages are needed.
 - The built-in fetchers only read usage. Claude polling does not send prompts or consume model tokens.
-- All bars show **remaining** allowance. A red `N/A` means fetching failed, not that the quota is exhausted. The dashboard shows the error.
+- All widgets show **remaining** allowance. The minimal strip uses `--` for unavailable/unknown usage; traditional progress bars use `N/A` for errors. The dashboard shows the reason.
 
 ## Local installation
 
@@ -19,17 +19,25 @@ git clone --recurse-submodules https://github.com/alvinunreal/agent-usage-tmux.g
 Add these lines to `~/.tmux.conf`:
 
 ```tmux
-set -g status-right "#{claude_usage} | #{codex_usage} | #{copilot_usage} | #{opencodego_usage} "
+set -g status-right ""
+set -g status-position bottom
+set -g @agent_usage_top on
 run-shell ~/repos/tmux-agent-usage/agent-usage.tmux
-bind u display-popup -w 90% -h 80% -T " Agent usage " -E 'bash "$HOME/repos/tmux-agent-usage/scripts/usage_popup.sh"'
+bind u display-popup -w 90% -h 80% -T " Agent usage " -s "bg=black,fg=colour252" -S "bg=black,fg=colour39" -E 'bash "$HOME/repos/tmux-agent-usage/scripts/usage_popup.sh"'
 ```
 
 - Reload with `tmux source-file ~/.tmux.conf` from a running tmux server.
 - Press your prefix, then **u**, to open the dashboard. Scroll with arrows or Page Up/Down, and press **q** to close.
-- `#{agent_usage}` retains the original Claude/Codex pair. `#{agent_usage_all}` displays all four.
+- `@agent_usage_top on` adds a one-line, non-interactive usage pane at the top of each window. Your normal status bar stays at the bottom, unchanged. The pane takes one content line plus its separator.
+- The strip uses consistent names: Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Claude and Codex also show reset countdowns in parentheses. Wider terminals show all details; narrow terminals omit countdowns to keep provider names visible.
+- The black popup uses aligned window, remaining-percentage, and reset columns. It includes all supported windows, credit details, and actionable errors.
+- New windows get the usage pane automatically. Reloads do not duplicate it; layout changes and resizes keep it at the top. Zooming a work pane temporarily hides it.
+- Set `@agent_usage_top off` and reload the plugin to remove usage panes and their lifecycle hooks. Normal work panes and status options are left untouched.
+- Individual placeholders remain available for traditional status-left/right layouts: `#{claude_usage}`, `#{codex_usage}`, `#{copilot_usage}`, `#{opencodego_usage}`, `#{antigravity_usage}`, and `#{grok_usage}`.
+- `#{agent_usage}` retains the original Claude/Codex pair. `#{agent_usage_all}` displays all six.
 - The dashboard and bars share one private cache per provider in `${XDG_CACHE_HOME:-~/.cache}/agent-usage-tmux`. Successful snapshots last 120 seconds; failures last 30 seconds. Credentials are never cached.
-- Right-click **Refresh now** bypasses the cached snapshots. Switching windows reuses the current snapshot.
-- The plugin preserves your `status-interval`, existing bindings outside usage bars, and mouse preference.
+- Traditional status widgets support right-click **Refresh now** to bypass cached snapshots. The top strip is non-interactive; changing `@agent_usage_nonce` forces a fresh snapshot on its next refresh.
+- The plugin preserves your `status-interval`, existing bindings outside usage bars, and mouse preference. Top panes refresh only in active windows and do not receive keyboard input.
 
 ## Authentication and windows
 
@@ -39,6 +47,8 @@ bind u display-popup -w 90% -h 80% -T " Agent usage " -E 'bash "$HOME/repos/tmux
 | Codex | Existing `~/.codex/auth.json` access token and account ID. | Windows reported by the account; a single weekly window is labeled weekly, not five-hour. |
 | Copilot | `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`. | Monthly premium interactions / AI credits. |
 | OpenCode Go | `OPENCODE_GO_API_KEY`, then the active OpenCode CLI credential. | Five-hour, weekly, and monthly when reported. |
+| Antigravity | Existing `agy` CLI login, with `agy` 1.1.11+. `ANTIGRAVITY_CLI_PATH` can select an executable. | Measured five-hour and weekly model-group quotas. |
+| Grok | `GROK_OAUTH_TOKEN`, then `${GROK_HOME:-~/.grok}/auth.json` from `grok login`. | Reported credit allowance and prepaid wallet. |
 
 - Copilot uses GitHub's internal usage API. A token must have Copilot access; a generic PAT may be rejected. Run `gh auth login` with the intended GitHub account or supply a suitable OAuth token.
 - Copilot shows credit usage without inventing a percentage when the API supplies no metered allowance. Unlimited plans are labeled explicitly.
@@ -47,6 +57,11 @@ bind u display-popup -w 90% -h 80% -T " Agent usage " -E 'bash "$HOME/repos/tmux
 - `XDG_DATA_HOME` and `OPENCODE_DB` follow the OpenCode CLI path conventions. Tokens are reread on each uncached fetch; this plugin does not renew or modify them.
 - Use `@agent_usage_window_copilot monthly` and `@agent_usage_window_opencodego 5h|weekly|monthly` to select the new provider windows. A monthly bar has an `m` prefix; a weekly bar has `w`.
 - Clicking Copilot keeps its monthly view. Clicking OpenCode Go cycles five-hour, weekly, and monthly; the context menu offers each supported window.
+- Antigravity runs the structured `agy -p /usage --output-format json` report, never a model prompt. Versions older than 1.1.11 are rejected before invoking `/usage`.
+- The Antigravity probe disables auto-updates and browser launchers, uses a private working directory, caps output at 1 MiB, and bounds the report to 35 seconds. Its owned process group is stopped on completion or failure.
+- Antigravity shows **Gemini models only**, in both the status row and popup. The status shows the lowest remaining allowance across measured Gemini groups for the selected window, not an average. Starter accounts with only weekly quotas do not gain a fabricated five-hour quota.
+- Grok reads the subscriber credit API with the existing CLI OAuth token. It never uses an xAI management/API key, opens a login browser, or refreshes tokens. Missing/expired authentication reports `run grok login`.
+- A Grok billing period without a percentage is labeled unknown, not 100% remaining. The popup shows a reported prepaid wallet separately. Team-principal usage is unsupported.
 - Custom percentage/reset overrides also support the `copilot` and `opencodego` suffixes. They retain the original shell-command interface and must print numeric output.
 
 ![Plugin preview](docs/preview.png)
@@ -152,6 +167,8 @@ python3 -m unittest discover -s tests -v
 shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh
 python3 scripts/usage_data.py copilot --json
 python3 scripts/usage_data.py opencodego --json
+python3 scripts/usage_data.py antigravity --json
+python3 scripts/usage_data.py grok --json
 python3 scripts/usage_stats.py all
 
 python3 scripts/fetch_claude_usage.py

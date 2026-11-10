@@ -8,13 +8,13 @@ count_usage_width() {
     local token
     local tail
 
-    for token in "#{agent_usage}" "#{agent_usage_all}" "#{claude_usage}" "#{codex_usage}" "#{copilot_usage}" "#{opencodego_usage}"; do
+    for token in "#{agent_usage}" "#{agent_usage_all}" "#{claude_usage}" "#{codex_usage}" "#{copilot_usage}" "#{opencodego_usage}" "#{antigravity_usage}" "#{grok_usage}"; do
         tail="$string"
         while [[ "$tail" == *"$token"* ]]; do
             # one column more than the bar needs, for the 'w' of the weekly window
             case "$token" in
                 "#{agent_usage}") total=$(( total + 41 )) ;;
-                "#{agent_usage_all}") total=$(( total + 90 )) ;;
+                "#{agent_usage_all}") total=$(( total + 140 )) ;;
                 *) total=$(( total + 21 )) ;;
             esac
             tail="${tail#*"$token"}"
@@ -29,16 +29,20 @@ count_usage_width() {
 # immediately instead of leaving the old window up until the next tick.
 do_interpolation() {
     local string="$1"
+    local mode="${2:-full}"
     local claude_window="#{@agent_usage_window_claude}"
     local codex_window="#{@agent_usage_window_codex}"
     local copilot_window="#{@agent_usage_window_copilot}"
     local opencodego_window="#{@agent_usage_window_opencodego}"
+    local antigravity_window="#{@agent_usage_window_antigravity}"
     local nonce="#{@agent_usage_nonce}"   # bumped by the menu's 'Refresh now'
     # individual bars
-    string="${string//\#\{claude_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" claude $claude_window $nonce)}"
-    string="${string//\#\{codex_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" codex $codex_window $nonce)}"
-    string="${string//\#\{copilot_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" copilot $copilot_window $nonce)}"
-    string="${string//\#\{opencodego_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" opencodego $opencodego_window $nonce)}"
+    string="${string//\#\{claude_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" claude $claude_window $nonce $mode)}"
+    string="${string//\#\{codex_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" codex $codex_window $nonce $mode)}"
+    string="${string//\#\{copilot_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" copilot $copilot_window $nonce $mode)}"
+    string="${string//\#\{opencodego_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" opencodego $opencodego_window $nonce $mode)}"
+    string="${string//\#\{antigravity_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" antigravity $antigravity_window $nonce $mode)}"
+    string="${string//\#\{grok_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" grok credits $nonce $mode)}"
     # combined (backwards compat)
     string="${string//\#\{agent_usage\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" both $claude_window $codex_window $nonce)}"
     string="${string//\#\{agent_usage_all\}/#(\"$CURRENT_DIR/scripts/agent_usage.sh\" all $claude_window $codex_window $copilot_window $opencodego_window $nonce)}"
@@ -135,9 +139,11 @@ main() {
     ensure_option @agent_usage_window_codex "5h"
     ensure_option @agent_usage_window_copilot "monthly"
     ensure_option @agent_usage_window_opencodego "5h"
+    ensure_option @agent_usage_window_antigravity "5h"
     ensure_option @agent_usage_nonce "0"
     update_tmux_option "status-right"
     update_tmux_option "status-left"
+    python3 "$CURRENT_DIR/scripts/usage_top.py" configure || return
     bind_mouse
 }
 

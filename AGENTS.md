@@ -9,12 +9,18 @@ When working in this repo, document any major concepts you introduce or discover
 ## Fork provider integration
 
 - `scripts/usage_data.py` owns read-only provider collection, normalized quota windows, and the shared two-minute cache. Error snapshots expire after 30 seconds.
-- `scripts/agent_usage.sh` supports macOS Bash 3.2 and renders Claude, Codex, Copilot, and OpenCode Go. It must not convert failed fetches into zero-percent bars.
+- `scripts/agent_usage.sh` supports macOS Bash 3.2 and renders Claude, Codex, Copilot, OpenCode Go, Antigravity, and Grok. It must not convert failed fetches into zero-percent bars.
 - `scripts/usage_stats.py` uses the same cache for the dashboard. `scripts/usage_popup.sh` opens the output in `less -R`.
 - `references/CodexBar` is a pinned API/authentication reference, not a runtime dependency. The upstream remote remains `artischocki/agent-usage-tmux`.
 - Claude usage comes from the read-only OAuth usage endpoint. Never send model requests to poll quota.
 - Copilot exposes monthly premium quotas and AI credits. Never invent an allowance for unlimited or token-only snapshots.
 - OpenCode Go credentials are read from the active CLI SQLite credential table. Never fall back to legacy credentials after a v2 logout or refresh tokens automatically.
+- Antigravity uses the structured `agy` usage command after checking version 1.1.11+. Keep auto-updates and browser launchers disabled, bound output and runtime, and stop the owned process group.
+- Antigravity includes Gemini model groups only, in both the popup and status row. Show the lowest remaining Gemini quota for a status window; never average allowances or infer missing windows.
+- Grok uses subscriber OAuth credentials and the CLI-proxy credits endpoint. A period without a usage percentage is unknown, not unused. Prepaid balances are cents on the wire.
+- `@agent_usage_top on` uses `scripts/usage_top.py` to maintain a one-line top pane while leaving normal status options untouched. Hook index 1900 owns pane creation, layout repair, and focus redirection; disabling the option removes only marked usage panes.
+- Minimal strip labels are Claude, Codex, Copilot, OpenCode, Gemini, and Grok. Use percentages without icons or window-letter prefixes, show `--` for unknown usage, and include Claude/Codex reset countdowns.
+- Usage popup bindings use explicit black background and blue border styles, with lowercase prefix `u`.
 - Run `python3 -m unittest discover -s tests -v` and `shellcheck agent-usage.tmux scripts/agent_usage.sh scripts/usage_menu.sh scripts/usage_popup.sh` after changes.
 
 ---

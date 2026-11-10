@@ -21,9 +21,77 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import fetch_claude_usage as claude
 import usage_data as usage
+import usage_top as top
 
 
 class ParsingTests(unittest.TestCase):
+    def test_grok_credit_percentage_and_wallet_cents(self):
+        data = usage.parse_grok({"config": {
+            "creditUsagePercent": 12.5,
+            "currentPeriod": {"end": "2026-12-01T00:00:00Z"},
+            "prepaidBalance": {"val": "1234"},
+        }})
+        self.assertEqual(data["windows"]["credits"]["remaining"], 88)
+        self.assertEqual(data["windows"]["credits"]["reset_at"], 1796083200)
+        self.assertEqual(data["balance_usd"], 12.34)
+
+    def test_grok_uses_reported_cap_without_inventing_zero_usage(self):
+        data = usage.parse_grok({"config": {
+            "onDemandCap": {"val": 200}, "onDemandUsed": {"val": 50},
+        }})
+        self.assertEqual(data["windows"]["credits"]["remaining"], 75)
+        data = usage.parse_grok({"config": {
+            "currentPeriod": {"end": "2026-12-01T00:00:00Z"},
+        }})
+        self.assertEqual(data["windows"], {})
+        self.assertEqual(data["status"], "credit usage unknown")
+        for payload in ({}, {"config": {}}):
+            with self.subTest(payload=payload), self.assertRaises(usage.UsageError):
+                usage.parse_grok(payload)
+
+    @staticmethod
+    def antigravity_report(groups):
+        return {"status": "SUCCESS", "command": {"name": "usage", "data": {"groups": groups}}}
+
+    def test_antigravity_only_keeps_gemini_model_groups(self):
+        data = usage.parse_antigravity(self.antigravity_report([
+            {"name": "Gemini Models", "buckets": [
+                {"window": "weekly", "remaining_fraction": 0.87},
+                {"window": "5h", "remaining_fraction": 0.95},
+            ]},
+            {"displayName": "Claude and GPT models", "buckets": [
+                {"window": "weekly", "remainingFraction": 0.4},
+                {"window": "5h", "remaining": {"case": "remainingFraction", "value": 0.8}},
+            ]},
+            {"displayName": "Gemini 4 Argon", "buckets": [
+                {"window": "weekly", "remainingFraction": 0.53},
+                {"window": "5h", "remaining": {"case": "remainingFraction", "value": 0.8}},
+            ]},
+        ]))
+        self.assertEqual(len(data["details"]), 4)
+        self.assertEqual(data["windows"]["5h"]["remaining"], 80)
+        self.assertEqual(data["windows"]["weekly"]["remaining"], 53)
+        self.assertIn("Gemini", data["windows"]["weekly"]["label"])
+        self.assertNotIn("Claude", json.dumps(data))
+
+    def test_antigravity_unknown_and_disabled_are_not_full_allowances(self):
+        for buckets in ([], [{"window": "5h"}], [
+            {"window": "5h", "remaining_fraction": 1, "disabled": True},
+        ]):
+            with self.subTest(buckets=buckets), self.assertRaises(usage.UsageError):
+                usage.parse_antigravity(self.antigravity_report([{"name": "Gemini Models", "buckets": buckets}]))
+        for payload in ({}, {"status": "ERROR"}, {
+            "status": "SUCCESS", "command": {"name": "models", "data": {}},
+        }):
+            with self.subTest(payload=payload), self.assertRaises(usage.UsageError):
+                usage.parse_antigravity(payload)
+
+    def test_antigravity_starter_weekly_does_not_gain_five_hour_quota(self):
+        data = usage.parse_antigravity(self.antigravity_report([{
+            "name": "Gemini", "buckets": [{"window": "weekly", "remaining_fraction": 0.5}],
+        }]))
+        self.assertEqual(list(data["windows"]), ["weekly"])
+
     def test_copilot_monthly_quota_and_credits(self):
         data = usage.parse_copilot({
             "quota_reset_date": "2026-12-01",
@@ -172,6 +240,68 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(usage.copilot_token(), "oauth-token")
             self.assertIn("github.com", run.call_args.args[0])
 
+    def test_grok_prefers_oidc_and_never_uses_api_keys(self):
+        path = Path(self.temp.name) / "auth.json"
+        path.write_text(json.dumps({
+            "https://accounts.x.ai/sign-in": {"key": "legacy"},
+            "https://auth.x.ai::client": {"key": "oidc", "expires_at": "2099-01-01T00:00:00Z"},
+        }))
+        with patch.dict(os.environ, {"GROK_HOME": self.temp.name, "GROK_OAUTH_TOKEN": ""}):
+            self.assertEqual(usage.grok_token(), "oidc")
+        with patch.dict(os.environ, {"GROK_OAUTH_TOKEN": "xai-api-key"}), \
+             self.assertRaisesRegex(usage.UsageError, "not an xAI API key"):
+            usage.grok_token()
+
+    def test_grok_missing_and_expired_login_report_actionable_errors(self):
+        with patch.dict(os.environ, {"GROK_HOME": self.temp.name, "GROK_OAUTH_TOKEN": ""}):
+            with self.assertRaisesRegex(usage.UsageError, "grok login"):
+                usage.grok_token()
+            (Path(self.temp.name) / "auth.json").write_text(json.dumps({
+                "https://auth.x.ai::client": {"key": "expired", "expires_at": "2000-01-01T00:00:00Z"},
+            }))
+            with self.assertRaisesRegex(usage.UsageError, "expired"):
+                usage.grok_token()
+
+
+class AntigravityCommandTests(unittest.TestCase):
+    def test_old_cli_never_receives_usage_as_a_prompt(self):
+        with patch.object(usage.shutil, "which", return_value=sys.executable), \
+             patch.dict(os.environ, {}, clear=True), \
+             patch.object(usage, "run_agy", return_value=b"1.1.10") as run:
+            with self.assertRaisesRegex(usage.UsageError, "1.1.11"):
+                usage.fetch_antigravity()
+            self.assertEqual(run.call_count, 1)
+
+    def test_usage_probe_disables_updating_and_browser_launch(self):
+        report = ParsingTests.antigravity_report([{
+            "name": "Gemini", "buckets": [{"window": "weekly", "remaining_fraction": 0.5}],
+        }])
+        calls = []
+
+        def fake_run(arguments, environment, directory, timeout):
+            calls.append(arguments)
+            self.assertEqual(environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true")
+            for name in ("open", "xdg-open"):
+                launcher = Path(directory) / name
+                self.assertEqual(launcher.read_text(), "#!/bin/sh\nexit 1\n")
+                self.assertEqual(launcher.stat().st_mode & 0o777, 0o700)
+            self.assertTrue(environment["PATH"].startswith(directory + os.pathsep))
+            return b"1.5.4" if "--version" in arguments else json.dumps(report).encode()
+
+        with patch.dict(os.environ, {"ANTIGRAVITY_CLI_PATH": sys.executable}), \
+             patch.object(usage, "run_agy", side_effect=fake_run):
+            self.assertEqual(usage.fetch_antigravity()["windows"]["weekly"]["remaining"], 50)
+        self.assertEqual(calls[1][1:], ["-p", "/usage", "--output-format", "json", "--print-timeout", "30s"])
+
+    def test_runner_caps_output_and_times_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for code, timeout, expected in (
+                ("import time; time.sleep(20)", 0.1, "timed out"),
+                ("import sys; sys.stdout.write('x' * 1100000)", 5, "1 MiB"),
+            ):
+                with self.subTest(code=code), self.assertRaisesRegex(usage.UsageError, expected):
+                    usage.run_agy([sys.executable, "-c", code], dict(os.environ), directory, timeout)
+
 
 class CacheTests(unittest.TestCase):
     def test_cache_reuses_windows_and_refresh_nonce_bypasses_it(self):
@@ -211,6 +341,30 @@ class CacheTests(unittest.TestCase):
             result = usage.cached_usage("codex")
             self.assertIn("HTTP 401", result["error"])
             self.assertNotIn("sensitive", json.dumps(result))
+
+
+class MinimalDisplayTests(unittest.TestCase):
+    def test_top_strip_uses_consistent_names_and_fits_narrow_terminals(self):
+        sections = {
+            provider: f"\033[37m{label} \033[36m100%\033[0m" +
+            (" (2d14h)" if provider in ("claude", "codex") else "")
+            for provider, label in top.NAMES.items()
+        }
+        wide = top.ANSI.sub("", top.compact_line(sections, 152))
+        narrow = top.ANSI.sub("", top.compact_line(sections, 80))
+        self.assertIn("Claude 100% (2d14h)", wide)
+        self.assertIn("Codex 100% (2d14h)", wide)
+        self.assertLessEqual(len(narrow), 80)
+        for label in top.NAMES.values():
+            self.assertIn(label, narrow)
+        self.assertNotIn("w100", wide)
+        self.assertNotIn("m100", wide)
+
+    def test_tmux_styles_translate_without_mouse_ranges_or_light_background(self):
+        result = top.ansi_usage("#[range=user|au-claude]#[fg=colour252]Claude #[bold]50%#[default]#[norange]")
+        self.assertNotIn("#[", result)
+        self.assertIn("\033[38;5;252m", result)
+        self.assertIn("\033[0;40;37m", result)
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
@@ -254,6 +408,7 @@ class TmuxIntegrationTests(unittest.TestCase):
             env=cls.environment, capture_output=True, text=True, check=True)
 
     def setUp(self):
+        self.tmux("set-option", "-gu", "@agent_usage_top")
         for provider in usage.PROVIDERS:
             self.tmux("set-option", "-g", f"@agent_usage_cmd_{provider}", "printf 50")
             self.tmux("set-option", "-g", f"@agent_usage_reset_cmd_{provider}", "printf 3600")
@@ -267,6 +422,93 @@ class TmuxIntegrationTests(unittest.TestCase):
             self.assertIn(f"au-{provider}", result.stdout)
         self.assertIn("GH m50%", result.stdout)
         self.assertNotIn("N/A", result.stdout)
+
+    def test_new_provider_compact_labels_and_unknown_status(self):
+        for provider, window, text in (
+            ("antigravity", "weekly", "Gemini"), ("grok", "credits", "Grok"),
+        ):
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "scripts/agent_usage.sh"), provider, window, "0", "compact"],
+                env=self.environment, capture_output=True, text=True, check=True)
+            self.assertIn(text, result.stdout)
+            self.assertIn("50%", result.stdout)
+            self.assertNotIn("w50%", result.stdout)
+            self.assertNotIn("█", result.stdout)
+            self.assertNotIn("01:00", result.stdout)
+
+    def test_claude_and_codex_compact_bars_include_reset_countdowns(self):
+        for provider in ("claude", "codex"):
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "scripts/agent_usage.sh"), provider, "5h", "0", "compact"],
+                env=self.environment, capture_output=True, text=True, check=True)
+            self.assertIn("50%", result.stdout)
+            self.assertIn("(1h)", result.stdout)
+            self.assertNotIn("█", result.stdout)
+
+    def test_top_pane_preserves_bottom_bar_focus_and_new_window_layout(self):
+        original = self.tmux("show-option", "-gqv", "status-format[0]").stdout.strip()
+        position = self.tmux("show-option", "-gqv", "status-position").stdout.strip()
+        rows = self.tmux("show-option", "-gqv", "status").stdout.strip()
+        work = self.tmux("display-message", "-p", "#{pane_id}").stdout.strip()
+        self.tmux("set-option", "-g", "@agent_usage_top", "on")
+        self.addCleanup(self.disable_top)
+        for _ in range(2):
+            subprocess.run(["/bin/bash", str(ROOT / "agent-usage.tmux")],
+                           env=self.environment, capture_output=True, text=True, check=True)
+        self.assertEqual(self.tmux("show-option", "-gqv", "status-format[0]").stdout.strip(), original)
+        self.assertEqual(self.tmux("show-option", "-gqv", "status-position").stdout.strip(), position)
+        self.assertEqual(self.tmux("show-option", "-gqv", "status").stdout.strip(), rows)
+        header = self.tmux("show-option", "-wqv", "@agent_usage_pane").stdout.strip()
+        self.assertTrue(header.startswith("%"))
+        self.assertEqual(self.tmux("display-message", "-p", "-t", header,
+                                  "#{pane_top} #{pane_height} #{pane_input_off}").stdout.strip(), "0 1 1")
+        self.assertEqual(self.tmux("list-panes", "-F", "#{pane_id}").stdout.count("\n"), 2)
+        self.tmux("select-pane", "-t", header)
+        self.assertEqual(self.tmux("display-message", "-p", "#{pane_id}").stdout.strip(), work)
+        deadline = time.monotonic() + 5
+        text = ""
+        while time.monotonic() < deadline:
+            text = self.tmux("capture-pane", "-p", "-t", header).stdout
+            if "Claude 50% (1h)" in text and "Gemini 50%" in text and "Grok 50%" in text:
+                break
+            time.sleep(0.05)
+        self.assertIn("Claude 50% (1h)", text)
+        self.assertIn("Gemini 50%", text)
+        self.assertIn("Grok 50%", text)
+        new_window = self.tmux("new-window", "-d", "-P", "-F", "#{window_id}").stdout.strip()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if self.tmux("show-option", "-wqv", "-t", new_window, "@agent_usage_pane").stdout.strip():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(self.tmux("list-panes", "-t", new_window, "-F", "#{pane_id}").stdout.count("\n"), 2)
+            self.tmux("select-layout", "-t", new_window, "even-horizontal")
+            subprocess.run(["python3", str(ROOT / "scripts/usage_top.py"), "ensure"],
+                           env=self.environment, capture_output=True, text=True, check=True)
+            new_header = self.tmux("show-option", "-wqv", "-t", new_window, "@agent_usage_pane").stdout.strip()
+            self.assertEqual(self.tmux("display-message", "-p", "-t", new_header,
+                                      "#{pane_top} #{pane_height} #{pane_width}").stdout.strip(), "0 1 140")
+            new_work = next(
+                pane for pane in self.tmux("list-panes", "-t", new_window, "-F", "#{pane_id}").stdout.splitlines()
+                if pane != new_header)
+            self.tmux("send-keys", "-t", new_work, "exit", "Enter")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if new_window not in self.tmux("list-windows", "-a", "-F", "#{window_id}").stdout.splitlines():
+                    break
+                time.sleep(0.05)
+            self.assertNotIn(new_window, self.tmux("list-windows", "-a", "-F", "#{window_id}").stdout.splitlines())
+        finally:
+            if new_window in self.tmux("list-windows", "-a", "-F", "#{window_id}").stdout.splitlines():
+                self.tmux("kill-window", "-t", new_window)
+        self.disable_top()
+        self.assertEqual(self.tmux("list-panes", "-F", "#{pane_id}").stdout.strip(), work)
+
+    def disable_top(self):
+        self.tmux("set-option", "-g", "@agent_usage_top", "off")
+        subprocess.run(["python3", str(ROOT / "scripts/usage_top.py"), "configure"],
+                       env=self.environment, capture_output=True, text=True, check=True)
 
     def test_failed_custom_command_is_na_not_zero(self):
         self.tmux("set-option", "-g", "@agent_usage_cmd_copilot", "exit 1")
@@ -314,6 +556,7 @@ class TmuxIntegrationTests(unittest.TestCase):
             self.tmux("set-environment", "-g", "XDG_CACHE_HOME", directory)
             self.tmux("set-option", "-g", "prefix", "C-a")
             self.tmux("bind-key", "u", "display-popup", "-w", "90%", "-h", "80%", "-E",
+                      "-s", "bg=black,fg=colour252", "-S", "bg=black,fg=colour39",
                       f'bash "{ROOT}/scripts/usage_popup.sh"')
             while select.select([self.master], [], [], 0)[0]:
                 os.read(self.master, 65536)

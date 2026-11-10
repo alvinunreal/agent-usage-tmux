@@ -9,6 +9,10 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import select
+import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -21,16 +25,19 @@ sys.dont_write_bytecode = True
 import fetch_claude_usage as claude
 import fetch_codex_usage as codex
 
-PROVIDERS = ("claude", "codex", "copilot", "opencodego")
+PROVIDERS = ("claude", "codex", "copilot", "opencodego", "antigravity", "grok")
 WINDOWS = {
     "claude": ("5h", "weekly"),
     "codex": ("5h", "weekly"),
     "copilot": ("monthly",),
     "opencodego": ("5h", "weekly", "monthly"),
+    "antigravity": ("5h", "weekly"),
+    "grok": ("credits",),
 }
 LABELS = {
     "claude": "Claude Code", "codex": "Codex",
     "copilot": "GitHub Copilot", "opencodego": "OpenCode Go",
+    "antigravity": "Antigravity", "grok": "Grok",
 }
 
 
@@ -231,7 +238,178 @@ def parse_opencode(payload: dict, now: float) -> dict:
     return {"windows": windows}
 
 
+def grok_token() -> str:
+    if os.environ.get("GROK_OAUTH_TOKEN"):
+        token = os.environ["GROK_OAUTH_TOKEN"]
+    else:
+        path = Path(os.environ.get("GROK_HOME") or Path.home() / ".grok").expanduser() / "auth.json"
+        if not path.exists():
+            raise UsageError("Grok is not signed in; run grok login")
+        entries = read_json(path)
+        candidates = [
+            (scope, entry) for scope, entry in entries.items()
+            if isinstance(entry, dict) and isinstance(entry.get("key"), str) and entry["key"]
+            and (scope.startswith("https://auth.x.ai::") or "/sign-in" in scope)
+        ]
+        candidates.sort(key=lambda pair: not pair[0].startswith("https://auth.x.ai::"))
+        if not candidates:
+            raise UsageError("no Grok OAuth login; run grok login")
+        entry = candidates[0][1]
+        if entry.get("expires_at") and timestamp(entry["expires_at"]) <= time.time():
+            raise UsageError("Grok login expired; run grok login")
+        if str(entry.get("principal_type", "")).lower() == "team":
+            raise UsageError("Grok does not expose supported team usage")
+        token = entry["key"]
+    if token.startswith("xai-"):
+        raise UsageError("Grok usage needs a subscriber OAuth token, not an xAI API key")
+    return token
+
+
+def parse_grok(payload: dict) -> dict:
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise UsageError("Grok billing response is missing credit configuration")
+    period = config.get("currentPeriod") or {}
+    reset = period.get("end") or config.get("billingPeriodEnd")
+    used = config.get("creditUsagePercent")
+    if used is None:
+        cap = (config.get("onDemandCap") or {}).get("val")
+        consumed = (config.get("onDemandUsed") or {}).get("val")
+        if cap is not None and consumed is not None and number(cap) > 0:
+            used = number(consumed) / number(cap) * 100
+    data = {"windows": {}}
+    if used is not None:
+        data["windows"]["credits"] = meter(100 - number(used), reset, "Credits")
+    wallet = config.get("prepaidBalance")
+    if isinstance(wallet, dict):
+        cents = number(wallet.get("val", 0))
+        if cents >= 0:
+            data["balance_usd"] = cents / 100
+    if not data["windows"]:
+        # A current billing period without a percentage is unknown, not zero usage.
+        data["status"] = "credit usage unknown"
+        if reset:
+            data["period_reset_at"] = timestamp(reset)
+        elif "balance_usd" not in data:
+            raise UsageError("Grok returned no credit meter, billing period, or wallet")
+    return data
+
+
+def parse_antigravity(payload: dict) -> dict:
+    command = payload.get("command")
+    if payload.get("status") != "SUCCESS" or not isinstance(command, dict) or command.get("name") != "usage":
+        raise UsageError("Antigravity usage report failed; run agy and sign in")
+    report = command.get("data")
+    if not isinstance(report, dict) or not isinstance(report.get("groups"), list):
+        raise UsageError("Antigravity report is missing quota groups")
+    windows = {}
+    details = []
+    for group in report["groups"]:
+        if not isinstance(group, dict):
+            raise UsageError("invalid Antigravity quota group")
+        name = group.get("name") or group.get("display_name") or group.get("displayName") or "Models"
+        if not isinstance(name, str) or "gemini" not in name.casefold():
+            continue
+        for bucket in group.get("buckets") or []:
+            if not isinstance(bucket, dict):
+                raise UsageError("invalid Antigravity quota bucket")
+            if bucket.get("disabled"):
+                continue
+            fraction = first_value(bucket, ("remaining_fraction", "remainingFraction"))
+            nested = bucket.get("remaining")
+            if fraction is None and isinstance(nested, dict):
+                fraction = first_value(nested, ("remaining_fraction", "remainingFraction"))
+                if fraction is None and nested.get("case") == "remainingFraction":
+                    fraction = nested.get("value")
+            if fraction is None:
+                continue
+            window = bucket.get("window")
+            label = "5 hours" if window == "5h" else "Weekly" if window == "weekly" else (
+                bucket.get("name") or bucket.get("display_name") or "Quota")
+            selected = meter(
+                number(fraction) * 100,
+                first_value(bucket, ("reset_time", "resetTime")), f"{name} / {label}")
+            details.append(selected)
+            if window in WINDOWS["antigravity"]:
+                # Show the bottleneck, not an average of independent model allowances.
+                if window not in windows or selected["remaining"] < windows[window]["remaining"]:
+                    windows[window] = selected
+    if not details:
+        raise UsageError("Antigravity reported no measured, enabled Gemini quota")
+    if not windows:
+        raise UsageError("Antigravity reported unrecognized quota windows")
+    return {"windows": windows, "details": details}
+
+
+def run_agy(arguments: list[str], environment: dict, directory: str, timeout: float) -> bytes:
+    """Bound output and lifetime, including subprocesses in the owned process group."""
+    process = subprocess.Popen(
+        arguments, env=environment, cwd=directory, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UsageError("Antigravity usage timed out; run agy and check the login")
+            if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                continue
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > 1048576:
+                raise UsageError("Antigravity usage report exceeds 1 MiB")
+        if process.wait(timeout=max(0.01, deadline - time.monotonic())):
+            raise UsageError("Antigravity usage command failed; run agy and sign in")
+        return bytes(output)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
+
+
+def fetch_antigravity() -> dict:
+    binary = os.environ.get("ANTIGRAVITY_CLI_PATH") if "ANTIGRAVITY_CLI_PATH" in os.environ else shutil.which("agy")
+    if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        raise UsageError("install agy or set ANTIGRAVITY_CLI_PATH, then sign in with agy")
+    binary = str(Path(binary).resolve())
+    with tempfile.TemporaryDirectory(prefix="agent-usage-agy-") as directory:
+        environment = dict(os.environ, AGY_CLI_DISABLE_AUTO_UPDATE="true")
+        for name in ("open", "xdg-open"):
+            launcher = Path(directory) / name
+            launcher.write_text("#!/bin/sh\nexit 1\n")
+            launcher.chmod(0o700)
+        environment["PATH"] = directory + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
+        environment["BROWSER"] = str(Path(directory) / "open")
+        version = run_agy([binary, "--version"], environment, directory, 3).decode().strip()
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version) or tuple(map(int, version.split("."))) < (1, 1, 11):
+            raise UsageError("read-only Antigravity usage reports require agy 1.1.11 or later")
+        report = run_agy(
+            [binary, "-p", "/usage", "--output-format", "json", "--print-timeout", "30s"],
+            environment, directory, 35)
+        return parse_antigravity(json.loads(report))
+
+
 def fetch_provider(provider: str) -> dict:
+    if provider == "antigravity":
+        return fetch_antigravity()
+    if provider == "grok":
+        return parse_grok(request_json(
+            "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+            grok_token(), {"x-xai-token-auth": "xai-grok-cli"}))
     if provider == "copilot":
         return parse_copilot(request_json(
             "https://api.github.com/copilot_internal/user", copilot_token(), {
@@ -321,7 +499,7 @@ def cached_usage(provider: str, nonce: str = "0") -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider", choices=PROVIDERS)
-    parser.add_argument("--window", choices=("5h", "weekly", "monthly"))
+    parser.add_argument("--window", choices=("5h", "weekly", "monthly", "credits"))
     parser.add_argument("--nonce", default="0")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -333,7 +511,7 @@ def main() -> None:
         raise SystemExit(1)
     else:
         window = args.window or WINDOWS[args.provider][0]
-        if args.provider == "codex" and len(data["windows"]) == 1 and window == "5h":
+        if args.provider in ("codex", "antigravity") and len(data["windows"]) == 1 and window == "5h":
             window = next(iter(data["windows"]))
         selected = data["windows"].get(window)
         if selected:

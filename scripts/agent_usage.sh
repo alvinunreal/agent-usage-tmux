@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: agent_usage.sh [claude|codex|copilot|opencodego] [5h|weekly|monthly] [nonce]
+# Usage: agent_usage.sh <provider> [window] [nonce] [full|compact]
 #        agent_usage.sh both [claude-window] [codex-window]
 # Defaults to showing both bars when no argument is given.
 #
@@ -23,6 +23,19 @@ icon_for() {
         codex) printf '>_' ;;
         copilot) printf 'GH' ;;
         opencodego) printf 'Go' ;;
+        antigravity) printf 'AG' ;;
+        grok) printf 'Grok' ;;
+    esac
+}
+
+label_for() {
+    case "$1" in
+        claude) printf Claude ;;
+        codex) printf Codex ;;
+        copilot) printf Copilot ;;
+        opencodego) printf OpenCode ;;
+        antigravity) printf Gemini ;;
+        grok) printf Grok ;;
     esac
 }
 
@@ -36,6 +49,7 @@ get_window() {
     fi
 
     [[ "$agent" == "copilot" ]] && { echo "monthly"; return; }
+    [[ "$agent" == "grok" ]] && { echo "credits"; return; }
     case "$window" in
         weekly|week|7d|secondary) echo "weekly" ;;
         monthly) [[ "$agent" == "opencodego" ]] && echo "monthly" || echo "5h" ;;
@@ -88,17 +102,44 @@ format_reset() {
     fi
 }
 
+format_compact_reset() {
+    local seconds="$1"
+    [[ "$seconds" =~ ^[0-9]+$ ]] || { printf -- '--'; return; }
+    local days=$(( seconds / 86400 ))
+    local hours=$(( seconds % 86400 / 3600 ))
+    local minutes=$(( seconds % 3600 / 60 ))
+    if (( seconds == 0 )); then printf now
+    elif (( days > 0 )); then printf '%dd%dh' "$days" "$hours"
+    elif (( hours > 0 && minutes > 0 )); then printf '%dh%dm' "$hours" "$minutes"
+    elif (( hours > 0 )); then printf '%dh' "$hours"
+    elif (( minutes > 0 )); then printf '%dm' "$minutes"
+    else printf '<1m'
+    fi
+}
+
 render_bar() {
     local agent="$1"
     local pct="$2"
     local reset_label="$3"
     local window="${4:-5h}"
+    local mode="${5:-full}"
     local width=6
     local empty_bg="colour236"
     local sub_chars=('▏' '▎' '▍' '▌' '▋' '▊' '▉')
 
     (( pct < 0 )) && pct=0
     (( pct > 100 )) && pct=100
+
+    if [[ "$mode" == compact ]]; then
+        local quota_color=colour117
+        (( pct <= 50 )) && quota_color=colour214
+        (( pct <= 20 )) && quota_color=colour203
+        printf '#[fg=colour252]%s #[fg=%s,bold]%d%%#[default]' "$(label_for "$agent")" "$quota_color" "$pct"
+        case "$agent" in
+            claude|codex) printf ' #[fg=colour244](%s)#[default]' "$reset_label" ;;
+        esac
+        return
+    fi
 
     read -r full partial_idx <<< "$(awk -v p="$pct" -v w="$width" 'BEGIN {
         filled = p * w / 100
@@ -113,6 +154,8 @@ render_bar() {
         codex)  color="colour250" ;;  # soft light gray
         copilot) color="colour117" ;;
         opencodego) color="colour114" ;;
+        antigravity) color="colour183" ;;
+        grok) color="colour255" ;;
         *)
             if   (( pct >= 80 )); then color="colour160"
             elif (( pct >= 50 )); then color="colour214"
@@ -156,6 +199,7 @@ render_agent() {
     local reset_label
     local data pct_cmd reset_cmd actual_window failed=0
     local nonce="${3:-0}"
+    local mode="${4:-full}"
     window=$(get_window "$agent" "${2:-}")
     pct_cmd="$(custom_command "$agent" cmd)"
     reset_cmd="$(custom_command "$agent" reset_cmd)"
@@ -185,13 +229,25 @@ render_agent() {
     # (No colon in the name: tmux's #{s/…/…/:…} splits its arguments on it.)
     printf "#[range=user|au-%s]" "$agent"
     if (( failed )); then
-        printf '#[fg=colour160]%s N/A#[default]' "$(icon_for "$agent")"
+        if [[ "$mode" == compact ]]; then
+            printf '#[fg=colour252]%s #[fg=colour244]--#[default]' "$(label_for "$agent")"
+        else
+            printf '#[fg=colour160]%s N/A#[default]' "$(icon_for "$agent")"
+        fi
     elif [[ "$pct" == "status" ]]; then
-        printf '#[fg=colour117]%s %s#[default]' "$(icon_for "$agent")" "$reset_in"
+        if [[ "$mode" == compact ]]; then
+            printf '#[fg=colour252]%s #[fg=colour244]--#[default]' "$(label_for "$agent")"
+        else
+            printf '#[fg=colour117]%s %s#[default]' "$(icon_for "$agent")" "$reset_in"
+        fi
     elif [[ "$pct" =~ ^[0-9]+$ && ${#pct} -le 3 && "$pct" -le 100 ]] &&
          [[ "$reset_in" == "-" || "$reset_in" =~ ^[0-9]+$ ]]; then
-        reset_label=$(format_reset "$reset_in")
-        render_bar "$agent" "$((10#$pct))" "$reset_label" "$window"
+        if [[ "$mode" == compact ]]; then
+            reset_label=$(format_compact_reset "$reset_in")
+        else
+            reset_label=$(format_reset "$reset_in")
+        fi
+        render_bar "$agent" "$((10#$pct))" "$reset_label" "$window" "$mode"
     else
         printf 'invalid usage output for %s\n' "$agent" >&2
         printf '#[fg=colour160]%s N/A#[default]' "$(icon_for "$agent")"
@@ -200,7 +256,7 @@ render_agent() {
 }
 
 case "$AGENT" in
-    claude|codex|copilot|opencodego) render_agent "$AGENT" "$WINDOW" "${3:-0}" ;;
+    claude|codex|copilot|opencodego|antigravity|grok) render_agent "$AGENT" "$WINDOW" "${3:-0}" "${4:-full}" ;;
     all)
         nonce="${6:-0}"
         render_agent claude "$WINDOW" "$nonce"
@@ -210,6 +266,10 @@ case "$AGENT" in
         render_agent copilot monthly "$nonce"
         printf " | "
         render_agent opencodego "${5:-}" "$nonce"
+        printf " | "
+        render_agent antigravity "" "$nonce"
+        printf " | "
+        render_agent grok credits "$nonce"
         ;;
     ""|both)
         # Both bars: second argument is claude's window, third codex's.

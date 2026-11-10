@@ -19,12 +19,13 @@ AGENT="${2:-claude}"
 AGENT="${AGENT##*[-:]}"
 
 case "$AGENT" in
-    claude|codex|copilot|opencodego) ;;
+    claude|codex|copilot|opencodego|antigravity|grok) ;;
     *) printf 'unknown provider: %s\n' "$AGENT" >&2; exit 1 ;;
 esac
 
 current_window() {
     [[ "$AGENT" == "copilot" ]] && { echo monthly; return; }
+    [[ "$AGENT" == "grok" ]] && { echo credits; return; }
     case "$(tmux show-option -gqv "@agent_usage_window_${AGENT}" 2>/dev/null)" in
         weekly|week|7d|secondary) echo "weekly" ;;
         monthly) echo "monthly" ;;
@@ -51,6 +52,7 @@ case "$ACTION" in
     toggle)
         case "$AGENT:$(current_window)" in
             copilot:*) set_window monthly ;;
+            grok:*) set_window credits ;;
             opencodego:weekly) set_window monthly ;;
             *:5h) set_window weekly ;;
             *) set_window 5h ;;
@@ -58,14 +60,14 @@ case "$ACTION" in
         ;;
     window)
         case "$AGENT:${3:-5h}" in
-            copilot:monthly|opencodego:monthly|claude:5h|claude:weekly|codex:5h|codex:weekly|opencodego:5h|opencodego:weekly)
+            copilot:monthly|opencodego:monthly|claude:5h|claude:weekly|codex:5h|codex:weekly|opencodego:5h|opencodego:weekly|antigravity:5h|antigravity:weekly|grok:credits)
                 set_window "${3:-5h}" ;;
             *) echo "unsupported provider window" >&2; exit 1 ;;
         esac
         ;;
     menu)
-        entries=("Detailed stats" s "display-popup -w 90% -h 80% -E 'bash \"$SCRIPT_DIR/usage_popup.sh\" $AGENT'" "")
-        if [[ "$AGENT" != copilot ]]; then
+        entries=("Detailed stats" s "display-popup -w 90% -h 80% -s 'bg=black,fg=colour252' -S 'bg=black,fg=colour39' -E 'bash \"$SCRIPT_DIR/usage_popup.sh\" $AGENT'" "")
+        if [[ "$AGENT" != copilot && "$AGENT" != grok ]]; then
             entries+=("5-hour window" 5 "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" window $AGENT 5h'")
             entries+=("Weekly window" w "run-shell -b '\"$SCRIPT_DIR/usage_menu.sh\" window $AGENT weekly'")
         fi
